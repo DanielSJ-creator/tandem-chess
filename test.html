@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chess Online Test</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0a0a12; color: #ccc; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; min-height: 100vh; }
+h2 { color: #c8a45a; font-size: 18px; margin-bottom: 16px; letter-spacing: 2px; }
+#status { font-size: 12px; color: #888; margin-bottom: 12px; min-height: 18px; }
+#status.ok { color: #50d48a; }
+#status.err { color: #e05555; }
+.board { display: grid; grid-template-columns: repeat(8, 1fr); width: min(90vw, 400px); height: min(90vw, 400px); border: 2px solid #333; }
+.cell { display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: calc(min(90vw, 400px) / 9); user-select: none; position: relative; }
+.light { background: #f0d9b5; }
+.dark  { background: #b58863; }
+.cell.selected { outline: 3px solid #c8a45a; outline-offset: -3px; }
+.cell.move { background: rgba(200,164,90,0.5) !important; }
+.cell.cap  { outline: 3px solid #e05555; outline-offset: -3px; }
+#lobby { display: flex; flex-direction: column; gap: 10px; width: 280px; }
+button { background: #1a1a2e; border: 1px solid #c8a45a; color: #c8a45a; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+button:hover { background: #2a2a3e; }
+button:disabled { opacity: 0.4; cursor: default; }
+input { background: #111; border: 1px solid #333; color: #eee; padding: 10px; border-radius: 8px; font-size: 13px; font-family: monospace; width: 100%; }
+#code-box { background: #111; border: 1px solid #444; border-radius: 8px; padding: 12px; font-family: monospace; font-size: 15px; color: #c8a45a; word-break: break-all; text-align: center; }
+#info { margin-top: 10px; font-size: 11px; color: #888; text-align: center; }
+#turn-banner { font-size: 12px; margin-bottom: 8px; color: #c8a45a; text-align: center; min-height: 18px; }
+</style>
+</head>
+<body>
+<h2>♟ CHESS ONLINE TEST</h2>
+<div id="status">Bereit</div>
+
+<div id="lobby">
+  <button id="btn-host">🏠 Raum erstellen (Host = Weiß)</button>
+  <div style="text-align:center;color:#444;font-size:11px">— oder —</div>
+  <input id="code-input" placeholder="Raum-Code eingeben..." />
+  <button id="btn-join">→ Beitreten (Gast = Schwarz)</button>
+  <div id="code-box" style="display:none"></div>
+</div>
+
+<div id="game" style="display:none">
+  <div id="turn-banner"></div>
+  <div class="board" id="board"></div>
+  <div id="info"></div>
+</div>
+
+<script>
+const SERVER = "wss://tandem-chess-server-production.up.railway.app";
+
+// --- Chess Logic ---
+const FILES = ['a','b','c','d','e','f','g','h'];
+const PIECES = {
+  wK:'♔',wQ:'♕',wR:'♖',wB:'♗',wN:'♘',wP:'♙',
+  bK:'♚',bQ:'♛',bR:'♜',bB:'♝',bN:'♞',bP:'♟'
+};
+
+function initBoard() {
+  const b = Array(8).fill(null).map(() => Array(8).fill(null));
+  'RNBQKBNR'.split('').forEach((p,i) => { b[0][i]='b'+p; b[7][i]='w'+p; });
+  for(let i=0;i<8;i++) { b[1][i]='bP'; b[6][i]='wP'; }
+  return b;
+}
+
+function getLegalMoves(board, r, c, ep, castling) {
+  const piece = board[r][c];
+  if (!piece) return [];
+  const color = piece[0], type = piece[1];
+  const opp = color==='w'?'b':'w';
+  const moves = [];
+  const add = (nr, nc) => { if(nr>=0&&nr<8&&nc>=0&&nc<8&&(!board[nr][nc]||board[nr][nc][0]===opp)) moves.push([nr,nc]); };
+  const slide = (dr, dc) => { let nr=r+dr,nc=c+dc; while(nr>=0&&nr<8&&nc>=0&&nc<8){if(board[nr][nc]){if(board[nr][nc][0]===opp)moves.push([nr,nc]);break;}moves.push([nr,nc]);nr+=dr;nc+=dc;} };
+
+  if (type==='P') {
+    const dir = color==='w'?-1:1, start = color==='w'?6:1;
+    if (!board[r+dir]?.[c]) { moves.push([r+dir,c]); if(r===start&&!board[r+2*dir]?.[c]) moves.push([r+2*dir,c]); }
+    for(const dc of [-1,1]) {
+      if(board[r+dir]?.[c+dc]?.[0]===opp) moves.push([r+dir,c+dc]);
+      if(ep&&ep[0]===r+dir&&ep[1]===c+dc) moves.push([r+dir,c+dc]);
+    }
+  } else if(type==='N') {
+    [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]].forEach(([dr,dc])=>add(r+dr,c+dc));
+  } else if(type==='B') {
+    [[-1,-1],[-1,1],[1,-1],[1,1]].forEach(([dr,dc])=>slide(dr,dc));
+  } else if(type==='R') {
+    [[-1,0],[1,0],[0,-1],[0,1]].forEach(([dr,dc])=>slide(dr,dc));
+  } else if(type==='Q') {
+    [[-1,-1],[-1,1],[1,-1],[1,1],[-1,0],[1,0],[0,-1],[0,1]].forEach(([dr,dc])=>slide(dr,dc));
+  } else if(type==='K') {
+    [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]].forEach(([dr,dc])=>add(r+dr,c+dc));
+    // castling
+    const row = color==='w'?7:0;
+    if(r===row&&c===4&&castling) {
+      if(castling[color+'K']&&!board[row][5]&&!board[row][6]&&board[row][7]===color+'R') moves.push([row,6]);
+      if(castling[color+'Q']&&!board[row][3]&&!board[row][2]&&!board[row][1]&&board[row][0]===color+'R') moves.push([row,2]);
+    }
+  }
+  return moves;
+}
+
+function applyMove(board, from, to, castling) {
+  const nb = board.map(r=>[...r]);
+  const piece = nb[from[0]][from[1]];
+  const cap = nb[to[0]][to[1]];
+  nb[to[0]][to[1]] = piece;
+  nb[from[0]][from[1]] = null;
+  // promotion
+  if(piece[1]==='P'&&(to[0]===0||to[0]===7)) nb[to[0]][to[1]] = piece[0]+'Q';
+  // castling rook
+  const nc = {...castling};
+  if(piece==='wK'){nc.wK=false;nc.wQ=false;if(to[1]===6){nb[7][5]=nb[7][7];nb[7][7]=null;}if(to[1]===2){nb[7][3]=nb[7][0];nb[7][0]=null;}}
+  if(piece==='bK'){nc.bK=false;nc.bQ=false;if(to[1]===6){nb[0][5]=nb[0][7];nb[0][7]=null;}if(to[1]===2){nb[0][3]=nb[0][0];nb[0][0]=null;}}
+  // ep
+  let newEp = null;
+  if(piece[1]==='P'&&Math.abs(to[0]-from[0])===2) newEp=[(to[0]+from[0])/2,to[1]];
+  return {nb, cap, nc, newEp};
+}
+
+// --- State ---
+let conn = null, isHost = false, myColor = 'w';
+let board = initBoard(), turn = 'w', castling = {wK:true,wQ:true,bK:true,bQ:true}, ep = null;
+let selected = null, legalMoves = [];
+
+// --- UI ---
+const setStatus = (msg, cls='') => { const el=document.getElementById('status'); el.textContent=msg; el.className=cls; };
+const setTurn = () => {
+  const el = document.getElementById('turn-banner');
+  if(turn===myColor) el.textContent = (myColor==='w'?'♔ Weiß':'♚ Schwarz') + ' — Dein Zug';
+  else el.textContent = (turn==='w'?'♔ Weiß':'♚ Schwarz') + ' zieht...';
+};
+
+function renderBoard() {
+  const el = document.getElementById('board');
+  el.innerHTML = '';
+  const flipped = myColor==='b';
+  for(let ri=0;ri<8;ri++) {
+    for(let ci=0;ci<8;ci++) {
+      const r = flipped?7-ri:ri, c = flipped?7-ci:ci;
+      const cell = document.createElement('div');
+      const isLight = (r+c)%2===0;
+      cell.className = 'cell ' + (isLight?'light':'dark');
+      const piece = board[r][c];
+      if(piece) cell.textContent = PIECES[piece]||'?';
+      // highlight
+      if(selected&&selected[0]===r&&selected[1]===c) cell.classList.add('selected');
+      if(legalMoves.some(([mr,mc])=>mr===r&&mc===c)) {
+        cell.classList.add(board[r][c]?'cap':'move');
+      }
+      cell.onclick = () => handleClick(r, c);
+      el.appendChild(cell);
+    }
+  }
+  setTurn();
+}
+
+function handleClick(r, c) {
+  if(turn!==myColor||!conn) return;
+  if(selected) {
+    const move = legalMoves.find(([mr,mc])=>mr===r&&mc===c);
+    if(move) {
+      doMove(selected, [r,c]);
+      return;
+    }
+  }
+  if(board[r][c]&&board[r][c][0]===myColor) {
+    selected = [r,c];
+    legalMoves = getLegalMoves(board,r,c,ep,castling);
+  } else {
+    selected = null; legalMoves = [];
+  }
+  renderBoard();
+}
+
+function doMove(from, to) {
+  const {nb, cap, nc, newEp} = applyMove(board, from, to, castling);
+  board = nb; castling = nc; ep = newEp;
+  turn = turn==='w'?'b':'w';
+  selected = null; legalMoves = [];
+  renderBoard();
+  conn.send(JSON.stringify({type:'move', from, to}));
+}
+
+function receiveMove(from, to) {
+  const {nb, cap, nc, newEp} = applyMove(board, from, to, castling);
+  board = nb; castling = nc; ep = newEp;
+  turn = turn==='w'?'b':'w';
+  selected = null; legalMoves = [];
+  renderBoard();
+}
+
+// --- Network ---
+function connect() {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(SERVER);
+    const timeout = setTimeout(()=>{ws.close();reject(new Error('Timeout'));},6000);
+    ws.onopen = () => { clearTimeout(timeout); resolve(ws); };
+    ws.onerror = () => { clearTimeout(timeout); reject(new Error('Verbindung fehlgeschlagen')); };
+  });
+}
+
+document.getElementById('btn-host').onclick = async () => {
+  setStatus('Verbinde mit Server...'); 
+  try {
+    const ws = await connect();
+    ws.send(JSON.stringify({type:'create', gameType:'online', tc:{min:5,inc:0}}));
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if(msg.type==='created') {
+        const code = msg.roomId;
+        document.getElementById('code-box').style.display='block';
+        document.getElementById('code-box').textContent = code;
+        setStatus('Warte auf Gegner... Code oben teilen!', 'ok');
+        ws.onmessage = (e2) => {
+          const m = JSON.parse(e2.data);
+          if(m.type==='guestJoined') {
+            conn = { send: (d) => ws.send(d) };
+            ws.onmessage = (e3) => {
+              const mv = JSON.parse(e3.data);
+              if(mv.type==='move') receiveMove(mv.from, mv.to);
+            };
+            isHost=true; myColor='w';
+            document.getElementById('lobby').style.display='none';
+            document.getElementById('game').style.display='block';
+            setStatus('Verbunden! Du spielst Weiß.', 'ok');
+            renderBoard();
+          }
+        };
+      }
+    };
+  } catch(e) { setStatus('Fehler: '+e.message, 'err'); }
+};
+
+document.getElementById('btn-join').onclick = async () => {
+  const code = document.getElementById('code-input').value.trim();
+  if(!code) { setStatus('Bitte Code eingeben!','err'); return; }
+  setStatus('Verbinde...');
+  try {
+    const ws = await connect();
+    ws.send(JSON.stringify({type:'join', roomId:code}));
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if(msg.type==='joined') {
+        conn = { send: (d) => ws.send(d) };
+        ws.onmessage = (e2) => {
+          const mv = JSON.parse(e2.data);
+          if(mv.type==='move') receiveMove(mv.from, mv.to);
+        };
+        isHost=false; myColor='b';
+        document.getElementById('lobby').style.display='none';
+        document.getElementById('game').style.display='block';
+        setStatus('Verbunden! Du spielst Schwarz.', 'ok');
+        renderBoard();
+      } else if(msg.type==='error') {
+        setStatus('Fehler: '+msg.msg, 'err');
+      }
+    };
+  } catch(e) { setStatus('Fehler: '+e.message, 'err'); }
+};
+</script>
+</body>
+</html>
